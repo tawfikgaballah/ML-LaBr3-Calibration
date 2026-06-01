@@ -1,3 +1,7 @@
+# Author: Tawfik Gaballah
+# GitHub: tawfikgaballah
+# Project: ML-LaBr3-Calibration
+
 """Train clover.energy -> clover.ecal and apply it to labr.energy.
 
 The learned model is a one-dimensional calibration function:

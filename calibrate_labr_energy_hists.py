@@ -1,3 +1,7 @@
+# Author: Tawfik Gaballah
+# GitHub: tawfikgaballah
+# Project: ML-LaBr3-Calibration
+
 """Interactively calibrate LaBr raw-energy histograms.
 
 This script reads the ``labr_energy_det0`` ... ``labr_energy_det17`` histograms
@@ -95,6 +99,24 @@ def ask_float(prompt: str) -> float:
             print("Please enter a number.")
 
 
+def parse_gamma_energies(text: str) -> list[float]:
+    values = [part.strip() for part in text.split(",") if part.strip()]
+    if not values:
+        raise ValueError("at least one gamma energy is required")
+    return [float(value) for value in values]
+
+
+def get_gamma_energies(args: argparse.Namespace) -> list[float]:
+    if args.gamma_energies:
+        return parse_gamma_energies(args.gamma_energies)
+
+    n_peaks = ask_int("How many gamma peaks do you want to calibrate on", 1)
+    gamma_energies: list[float] = []
+    for peak_index in range(n_peaks):
+        gamma_energies.append(ask_float(f"Gamma energy for peak {peak_index + 1}"))
+    return gamma_energies
+
+
 def parse_detectors(detector_text: str) -> list[int]:
     detectors: list[int] = []
     for part in detector_text.split(","):
@@ -136,6 +158,12 @@ def load_histograms(root: Any, input_path: Path, detectors: list[int]) -> dict[i
         hist = root_file.Get(f"labr_energy_det{det}")
         if not hist:
             print(f"Detector {det}: missing histogram labr_energy_det{det}; skipping")
+            continue
+        if hist.InheritsFrom("TH2"):
+            print(f"Detector {det}: labr_energy_det{det} is not a 1D histogram; skipping")
+            continue
+        if hist.GetEntries() <= 0 and hist.Integral() <= 0:
+            print(f"Detector {det}: labr_energy_det{det} is empty; skipping")
             continue
         hist.SetDirectory(0)
         histograms[det] = hist
@@ -209,13 +237,16 @@ def collect_detector_calibration(
     det: int,
     hist: Any,
     fit_half_width: float,
+    gamma_energies: list[float],
 ) -> list[dict[str, float]]:
     points: list[dict[str, float]] = []
-    n_peaks = ask_int(f"Detector {det}: how many peaks do you want to calibrate on", 1)
 
-    for peak_index in range(n_peaks):
+    for peak_index, gamma_energy in enumerate(gamma_energies):
         while True:
-            print(f"\nDetector {det}, peak {peak_index + 1}/{n_peaks}")
+            print(
+                f"\nDetector {det}, peak {peak_index + 1}/{len(gamma_energies)} "
+                f"({gamma_energy:g})"
+            )
             clicked_x = wait_for_click(root, canvas, hist)
             fit, result, fit_low, fit_high, centroid, centroid_error, sigma = fit_peak(
                 root,
@@ -240,7 +271,6 @@ def collect_detector_calibration(
                 print("Skipping this peak.")
                 break
 
-            gamma_energy = ask_float("Known gamma energy for this peak")
             points.append(
                 {
                     "detector": det,
@@ -323,6 +353,33 @@ def calibrate_histogram(
     return out
 
 
+def make_detector_index_histogram(
+    root: Any,
+    name: str,
+    title: str,
+    calibrated_hists: dict[int, Any],
+    bins: int,
+    cal_range: tuple[float, float],
+) -> Any:
+    hist2d = root.TH2D(
+        name,
+        title,
+        bins,
+        cal_range[0],
+        cal_range[1],
+        18,
+        0,
+        18,
+    )
+    for det, hist in calibrated_hists.items():
+        for bin_index in range(1, hist.GetNbinsX() + 1):
+            counts = hist.GetBinContent(bin_index)
+            if counts <= 0:
+                continue
+            hist2d.SetBinContent(bin_index, det + 1, counts)
+    return hist2d
+
+
 def write_csv(path: Path, rows: list[dict[str, float]], fieldnames: list[str]) -> None:
     with open(path, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -396,15 +453,32 @@ def write_outputs(
         )
         calibrated_hists[det] = hist
         summed.Add(hist)
+    detector_index_hist = make_detector_index_histogram(
+        root,
+        "labr_energy_cal_vs_detector_index",
+        "Calibrated LaBr energy vs detector index;Energy;Detector index",
+        calibrated_hists,
+        args.cal_bins,
+        cal_range,
+    )
 
     output_file = root.TFile(str(args.output), "RECREATE")
     for hist in calibrated_hists.values():
         hist.Write()
     summed.Write()
+    detector_index_hist.Write()
 
     canvas = root.TCanvas("calibrated_labr_sum_canvas", "calibrated_labr_sum_canvas", 1000, 700)
     summed.Draw()
     canvas.Write()
+    detector_canvas = root.TCanvas(
+        "calibrated_labr_detector_index_canvas",
+        "calibrated_labr_detector_index_canvas",
+        1000,
+        700,
+    )
+    detector_index_hist.Draw("COLZ")
+    detector_canvas.Write()
     for det, hist in calibrated_hists.items():
         det_canvas = root.TCanvas(
             f"calibrated_labr_det{det}_canvas",
@@ -419,6 +493,7 @@ def write_outputs(
     if args.png_dir:
         args.png_dir.mkdir(parents=True, exist_ok=True)
         canvas.SaveAs(str(args.png_dir / "labr_energy_cal_sum.png"))
+        detector_canvas.SaveAs(str(args.png_dir / "labr_energy_cal_vs_detector_index.png"))
         for det, hist in calibrated_hists.items():
             det_canvas = root.TCanvas(
                 f"png_calibrated_labr_det{det}_canvas",
@@ -465,6 +540,13 @@ def parse_args() -> argparse.Namespace:
         help="Detector list, for example 0-17 or 0,1,4.",
     )
     parser.add_argument(
+        "--gamma-energies",
+        help=(
+            "Comma-separated gamma energies to reuse for every detector, "
+            "for example 661.7,1173.2,1332.5. If omitted, you enter them once interactively."
+        ),
+    )
+    parser.add_argument(
         "--fit-half-width",
         type=float,
         default=150.0,
@@ -492,6 +574,8 @@ def main() -> None:
     histograms = load_histograms(root, args.input, detectors)
     if not histograms:
         raise ValueError("No detector histograms were loaded")
+    gamma_energies = get_gamma_energies(args)
+    print("Using gamma energies: " + ", ".join(f"{energy:g}" for energy in gamma_energies))
 
     canvas = root.TCanvas("labr_calibration_canvas", "LaBr calibration", 1100, 800)
     if args.logy:
@@ -516,6 +600,7 @@ def main() -> None:
             det,
             hist,
             args.fit_half_width,
+            gamma_energies,
         )
         if not points:
             print(f"Detector {det}: no accepted peaks; skipped")

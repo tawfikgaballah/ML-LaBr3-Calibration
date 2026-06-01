@@ -1,3 +1,7 @@
+# Author: Tawfik Gaballah
+# GitHub: tawfikgaballah
+# Project: ML-LaBr3-Calibration
+
 """Apply a trained Ei -> Ecal model to raw LaBr energies in ROOT files."""
 
 from __future__ import annotations

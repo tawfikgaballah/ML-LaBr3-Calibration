@@ -1,3 +1,7 @@
+# Author: Tawfik Gaballah
+# GitHub: tawfikgaballah
+# Project: ML-LaBr3-Calibration
+
 """Apply LaBr energy calibration and timing-model corrections to new ROOT runs."""
 
 from __future__ import annotations
@@ -285,6 +289,8 @@ def build_pair_dataframe(
             if allowed_i is not None and index_i not in allowed_i:
                 continue
             for index_j in valid_indices:
+                if index_i == index_j:
+                    continue
                 if allowed_j is not None and index_j not in allowed_j:
                     continue
                 rows.append(
@@ -786,6 +792,7 @@ def main() -> None:
             "Restricting pairs to detector indices known by the model: "
             f"i={sorted(allowed_i)}, j={sorted(allowed_j)}"
         )
+    print("Applying timing correction only to cross-detector pairs: index_i != index_j")
 
     file_specs = collect_file_specs(input_paths, args.tree, fraction, args.stop, require_dynode)
     total_entries = sum(entry_stop for _, _, entry_stop in file_specs)

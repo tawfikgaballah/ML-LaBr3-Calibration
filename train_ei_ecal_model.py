@@ -1,3 +1,7 @@
+# Author: Tawfik Gaballah
+# GitHub: tawfikgaballah
+# Project: ML-LaBr3-Calibration
+
 """Train Ecal(Ei, index_i) from extracted test_6D input.
 
 The target Ecal is first calculated from per-detector linear calibration

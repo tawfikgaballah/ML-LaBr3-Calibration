@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Author: Tawfik Gaballah
+# GitHub: tawfikgaballah
+# Project: ML-LaBr3-Calibration
+
 set -euo pipefail
 
 REMOTE="gaballah@nsclgw1.nscl.msu.edu:/mnt/analysis/e23055/tg/ML/"

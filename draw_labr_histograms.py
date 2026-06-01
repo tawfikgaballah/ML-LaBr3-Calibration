@@ -1,3 +1,7 @@
+# Author: Tawfik Gaballah
+# GitHub: tawfikgaballah
+# Project: ML-LaBr3-Calibration
+
 """Draw LaBr energy and calibrated-energy histograms from raw ROOT files."""
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ DEFAULT_WORKERS = max(1, min(4, os.cpu_count() or 1))
 DEFAULT_COEFFICIENTS = Path("labr_energy_calibration_coefficients.csv")
 DEFAULT_ECAL_BIN_WIDTH = 1.0
 DEFAULT_ENERGY_BIN_WIDTH = 10.0
+DEFAULT_MAX_ECAL_BINS = 100000
+DEFAULT_MAX_ENERGY_BINS = 100000
 
 
 def import_root():
@@ -164,6 +170,29 @@ def binned_range(
     return (low, low + bins * bin_width), bins
 
 
+def limit_range_bins(
+    label: str,
+    hist_range: tuple[float, float],
+    bin_width: float,
+    max_bins: int,
+    manual_range: bool,
+) -> tuple[float, float]:
+    if manual_range:
+        return hist_range
+    bins = max(1, int(np.ceil((hist_range[1] - hist_range[0]) / bin_width)))
+    if bins <= max_bins:
+        return hist_range
+
+    limited_low = 0.0 if hist_range[0] < 0 < hist_range[1] else hist_range[0]
+    limited_high = limited_low + max_bins * bin_width
+    print(
+        f"Warning: {label} automatic range {hist_range[0]:.3f} to {hist_range[1]:.3f} "
+        f"would create {bins} bins. Using {limited_low:.3f} to {limited_high:.3f} "
+        f"({max_bins} bins). Pass --{label}-range LOW HIGH to override."
+    )
+    return limited_low, limited_high
+
+
 def update_min_max(
     values: np.ndarray,
     current_low: float | None,
@@ -231,19 +260,22 @@ def labr_arrays_from_chunk(
     slopes: np.ndarray,
     has_coeff: np.ndarray,
     include_invalid: bool,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     energy = arrays[LABR_ENERGY_BRANCH][:, :18]
     if use_root_ecal:
         ecal = arrays[LABR_ECAL_BRANCH][:, :18]
-        valid = np.broadcast_to(has_coeff.reshape(1, -1), energy.shape).copy()
     else:
         ecal = intercepts.reshape(1, -1) + slopes.reshape(1, -1) * energy
-        valid = np.broadcast_to(has_coeff.reshape(1, -1), energy.shape).copy()
 
+    detector_valid = np.broadcast_to(has_coeff.reshape(1, -1), energy.shape).copy()
     if not include_invalid:
-        valid &= (energy > 0) & (ecal > 0)
+        energy_valid = detector_valid & (energy > 0)
+        ecal_valid = detector_valid & (ecal > 0)
+    else:
+        energy_valid = detector_valid
+        ecal_valid = detector_valid
 
-    return energy, ecal, valid
+    return energy, ecal, energy_valid, ecal_valid
 
 
 def scan_range_task(args):
@@ -276,7 +308,7 @@ def scan_range_task(args):
             entry_stop=entry_stop,
             step_size=chunk_size,
         ):
-            energy, ecal, valid = labr_arrays_from_chunk(
+            energy, ecal, energy_valid, ecal_valid = labr_arrays_from_chunk(
                 arrays,
                 use_root_ecal,
                 intercepts,
@@ -284,8 +316,8 @@ def scan_range_task(args):
                 has_coeff,
                 include_invalid,
             )
-            ecal = ecal[valid]
-            energy = energy[valid]
+            ecal = ecal[ecal_valid]
+            energy = energy[energy_valid]
             ecal_low, ecal_high = update_min_max(ecal, ecal_low, ecal_high)
             energy_low, energy_high = update_min_max(
                 energy, energy_low, energy_high
@@ -329,7 +361,7 @@ def histogram_count_task(args):
             entry_stop=entry_stop,
             step_size=chunk_size,
         ):
-            energy, ecal, valid = labr_arrays_from_chunk(
+            energy, ecal, energy_valid, ecal_valid = labr_arrays_from_chunk(
                 arrays,
                 use_root_ecal,
                 intercepts,
@@ -339,19 +371,20 @@ def histogram_count_task(args):
             )
 
             ecal_counts_all += np.histogram(
-                ecal[valid], bins=ecal_bins, range=ecal_range
+                ecal[ecal_valid], bins=ecal_bins, range=ecal_range
             )[0]
             energy_counts_all += np.histogram(
-                energy[valid], bins=energy_bins, range=energy_range
+                energy[energy_valid], bins=energy_bins, range=energy_range
             )[0]
 
             for det in np.flatnonzero(has_coeff):
-                det_valid = valid[:, det]
+                det_ecal_valid = ecal_valid[:, det]
+                det_energy_valid = energy_valid[:, det]
                 ecal_counts_det[det] += np.histogram(
-                    ecal[:, det][det_valid], bins=ecal_bins, range=ecal_range
+                    ecal[:, det][det_ecal_valid], bins=ecal_bins, range=ecal_range
                 )[0]
                 energy_counts_det[det] += np.histogram(
-                    energy[:, det][det_valid], bins=energy_bins, range=energy_range
+                    energy[:, det][det_energy_valid], bins=energy_bins, range=energy_range
                 )[0]
 
     return (
@@ -536,6 +569,8 @@ def fill_histograms(
                     ecal_counts_det += task_ecal_det
                     energy_counts_det += task_energy_det
 
+    print_detector_count_summary(energy_counts_det, ecal_counts_det, has_coeff)
+
     histograms: dict[str, Any] = {
         "labr_ecal_all": make_root_histogram(
             root,
@@ -549,6 +584,20 @@ def fill_histograms(
             "labr_energy_all",
             "LaBr raw energy;LaBr energy;Counts",
             energy_counts_all,
+            energy_range,
+        ),
+        "labr_ecal_vs_detector_index": make_root_detector_index_histogram(
+            root,
+            "labr_ecal_vs_detector_index",
+            "LaBr calibrated energy vs detector index;LaBr ecal;Detector index",
+            ecal_counts_det,
+            ecal_range,
+        ),
+        "labr_energy_vs_detector_index": make_root_detector_index_histogram(
+            root,
+            "labr_energy_vs_detector_index",
+            "LaBr raw energy vs detector index;LaBr energy;Detector index",
+            energy_counts_det,
             energy_range,
         ),
     }
@@ -572,6 +621,20 @@ def fill_histograms(
     return histograms
 
 
+def print_detector_count_summary(
+    energy_counts_det: np.ndarray,
+    ecal_counts_det: np.ndarray,
+    has_coeff: np.ndarray,
+) -> None:
+    print("Detector histogram entries kept:")
+    for det in range(18):
+        if not has_coeff[det]:
+            continue
+        energy_entries = int(np.sum(energy_counts_det[det]))
+        ecal_entries = int(np.sum(ecal_counts_det[det]))
+        print(f"  det {det:2d}: energy={energy_entries:8d}  ecal={ecal_entries:8d}")
+
+
 def make_root_histogram(
     root: Any,
     name: str,
@@ -585,12 +648,39 @@ def make_root_histogram(
     return histogram
 
 
+def make_root_detector_index_histogram(
+    root: Any,
+    name: str,
+    title: str,
+    counts_by_detector: np.ndarray,
+    energy_range: tuple[float, float],
+) -> Any:
+    x_bins = counts_by_detector.shape[1]
+    histogram = root.TH2D(
+        name,
+        title,
+        x_bins,
+        energy_range[0],
+        energy_range[1],
+        18,
+        0,
+        18,
+    )
+    for det in range(18):
+        for x_index, count in enumerate(counts_by_detector[det], start=1):
+            histogram.SetBinContent(x_index, det + 1, float(count))
+    return histogram
+
+
 def save_pngs(root: Any, histograms: dict[str, Any], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     canvas = root.TCanvas("canvas", "canvas", 1000, 700)
     for name, histogram in histograms.items():
         canvas.Clear()
-        histogram.Draw()
+        if histogram.InheritsFrom("TH2"):
+            histogram.Draw("COLZ")
+        else:
+            histogram.Draw()
         canvas.SaveAs(str(output_dir / f"{name}.png"))
 
 
@@ -662,6 +752,24 @@ def parse_args() -> argparse.Namespace:
         help="Manual LaBr energy histogram range. Skips energy range scanning.",
     )
     parser.add_argument(
+        "--max-ecal-bins",
+        type=int,
+        default=DEFAULT_MAX_ECAL_BINS,
+        help=(
+            "Maximum ecal bins for automatic ranges. "
+            f"Default: {DEFAULT_MAX_ECAL_BINS}."
+        ),
+    )
+    parser.add_argument(
+        "--max-energy-bins",
+        type=int,
+        default=DEFAULT_MAX_ENERGY_BINS,
+        help=(
+            "Maximum raw-energy bins for automatic ranges. "
+            f"Default: {DEFAULT_MAX_ENERGY_BINS}."
+        ),
+    )
+    parser.add_argument(
         "--include-invalid",
         action="store_true",
         help="Include zero/negative placeholder values. Default keeps only values > 0.",
@@ -685,6 +793,10 @@ def main() -> None:
         raise ValueError("--energy-bin-width must be greater than 0")
     if args.ecal_bin_width <= 0:
         raise ValueError("--ecal-bin-width must be greater than 0")
+    if args.max_ecal_bins <= 0:
+        raise ValueError("--max-ecal-bins must be greater than 0")
+    if args.max_energy_bins <= 0:
+        raise ValueError("--max-energy-bins must be greater than 0")
     root = import_root()
     input_patterns, percentage = split_inputs_and_percentage(args.inputs)
     input_paths = expand_input_patterns(input_patterns)
@@ -728,6 +840,20 @@ def main() -> None:
             ecal_range = tuple(args.ecal_range)
         if args.energy_range:
             energy_range = tuple(args.energy_range)
+    ecal_range = limit_range_bins(
+        "ecal",
+        ecal_range,
+        args.ecal_bin_width,
+        args.max_ecal_bins,
+        args.ecal_range is not None,
+    )
+    energy_range = limit_range_bins(
+        "energy",
+        energy_range,
+        args.energy_bin_width,
+        args.max_energy_bins,
+        args.energy_range is not None,
+    )
     ecal_range, ecal_bins = binned_range(ecal_range, args.ecal_bin_width)
     energy_range, energy_bins = binned_range(energy_range, args.energy_bin_width)
     print(f"LaBr ecal range: {ecal_range[0]:.3f} to {ecal_range[1]:.3f}")
