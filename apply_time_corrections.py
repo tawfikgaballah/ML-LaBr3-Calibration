@@ -71,10 +71,6 @@ def predict_tdiff(model: Any, features: pd.DataFrame) -> np.ndarray:
     return np.asarray(predictions, dtype=float).reshape(-1)
 
 
-def detector_pair_offsets(index_i: np.ndarray, index_j: np.ndarray, detector_offsets: np.ndarray) -> np.ndarray:
-    return detector_offsets[index_i] - detector_offsets[index_j]
-
-
 def looks_like_number(value: str) -> bool:
     try:
         float(value)
@@ -459,108 +455,7 @@ def apply_histogram_range_limits(
     return tdiff_range, corrected_range, ej_range
 
 
-def estimate_detector_offsets(
-    file_specs,
-    model,
-    chunk_size,
-    total_entries,
-    require_dynode,
-    pair_builder_args,
-    args,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if args.no_offset_correction:
-        print("Detector-offset correction disabled.", flush=True)
-        return np.zeros(18, dtype=float), np.zeros((18, 18), dtype=float), np.zeros((18, 18), dtype=float)
-
-    offset_range = validate_range("--offset-range", args.offset_range)
-    if offset_range is None:
-        raise ValueError("--offset-range is required when offset correction is enabled")
-
-    pair_sum = np.zeros((18, 18), dtype=float)
-    pair_counts = np.zeros((18, 18), dtype=float)
-    with tqdm(total=total_entries, unit="events", desc="Estimating detector offsets") as pbar:
-        for completed, pair_df in iter_pair_chunks(
-            file_specs,
-            chunk_size,
-            require_dynode,
-            pair_builder_args,
-        ):
-            pbar.update(completed)
-            if pair_df.empty:
-                continue
-            predictions = predict_tdiff(model, pair_df[FEATURE_COLUMNS])
-            residual = pair_df["T_Diff"].to_numpy(dtype=float) - predictions
-            index_i = pair_df["index_i"].to_numpy(dtype=np.intp)
-            index_j = pair_df["index_j"].to_numpy(dtype=np.intp)
-            mask = (
-                (index_i != index_j)
-                & np.isfinite(residual)
-                & (offset_range[0] <= residual)
-                & (residual <= offset_range[1])
-            )
-            if not np.any(mask):
-                continue
-            np.add.at(pair_sum, (index_i[mask], index_j[mask]), residual[mask])
-            np.add.at(pair_counts, (index_i[mask], index_j[mask]), 1.0)
-
-    offsets = solve_detector_offsets(pair_sum, pair_counts, args.min_offset_pair_count)
-    pair_means = np.divide(
-        pair_sum,
-        pair_counts,
-        out=np.zeros_like(pair_sum),
-        where=pair_counts > 0,
-    )
-    print_detector_offsets(offsets, pair_counts, args.min_offset_pair_count)
-    return offsets, pair_counts, pair_means
-
-
-def solve_detector_offsets(pair_sum: np.ndarray, pair_counts: np.ndarray, min_pair_count: int) -> np.ndarray:
-    rows: list[np.ndarray] = []
-    targets: list[float] = []
-    weights: list[float] = []
-    for index_i in range(18):
-        for index_j in range(18):
-            count = pair_counts[index_i, index_j]
-            if index_i == index_j or count < min_pair_count:
-                continue
-            row = np.zeros(18, dtype=float)
-            row[index_i] = 1.0
-            row[index_j] = -1.0
-            rows.append(row)
-            targets.append(pair_sum[index_i, index_j] / count)
-            weights.append(np.sqrt(count))
-
-    if not rows:
-        print(
-            "No detector pairs had enough statistics for offset solving; using zero offsets.",
-            flush=True,
-        )
-        return np.zeros(18, dtype=float)
-
-    matrix = np.vstack(rows)
-    target = np.asarray(targets, dtype=float)
-    weight = np.asarray(weights, dtype=float)
-    weighted_matrix = matrix * weight[:, np.newaxis]
-    weighted_target = target * weight
-    offsets, *_ = np.linalg.lstsq(weighted_matrix, weighted_target, rcond=None)
-    active = np.flatnonzero(np.sum(pair_counts >= min_pair_count, axis=0) + np.sum(pair_counts >= min_pair_count, axis=1))
-    if active.size:
-        offsets[active] -= float(np.mean(offsets[active]))
-    return offsets
-
-
-def print_detector_offsets(offsets: np.ndarray, pair_counts: np.ndarray, min_pair_count: int) -> None:
-    print("Estimated detector time offsets from this run:", flush=True)
-    for detector, offset in enumerate(offsets):
-        used_pairs = int(
-            np.sum(pair_counts[detector, :] >= min_pair_count)
-            + np.sum(pair_counts[:, detector] >= min_pair_count)
-        )
-        if used_pairs:
-            print(f"  detector {detector:2d}: {offset: .6f} using {used_pairs} pair directions", flush=True)
-
-
-def scan_ranges(file_specs, model, chunk_size, total_entries, require_dynode, pair_builder_args, detector_offsets):
+def scan_ranges(file_specs, model, chunk_size, total_entries, require_dynode, pair_builder_args):
     tdiff_low = tdiff_high = None
     corr_low = corr_high = None
     ej_low = ej_high = None
@@ -575,10 +470,7 @@ def scan_ranges(file_specs, model, chunk_size, total_entries, require_dynode, pa
             if pair_df.empty:
                 continue
             predictions = predict_tdiff(model, pair_df[FEATURE_COLUMNS])
-            index_i = pair_df["index_i"].to_numpy(dtype=np.intp)
-            index_j = pair_df["index_j"].to_numpy(dtype=np.intp)
-            offset_correction = detector_pair_offsets(index_i, index_j, detector_offsets)
-            corrected = pair_df["T_Diff"].to_numpy(dtype=float) - predictions - offset_correction
+            corrected = pair_df["T_Diff"].to_numpy(dtype=float) - predictions
             tdiff_low, tdiff_high = update_min_max(pair_df["T_Diff"].to_numpy(), tdiff_low, tdiff_high)
             corr_low, corr_high = update_min_max(corrected, corr_low, corr_high)
             ej_low, ej_high = update_min_max(pair_df["Ej"].to_numpy(), ej_low, ej_high)
@@ -686,60 +578,6 @@ def write_histograms(output_file: Any, state: dict[str, Any]) -> None:
     )
 
 
-def write_offset_tables(
-    output_file: Any,
-    detector_offsets: np.ndarray,
-    offset_pair_counts: np.ndarray,
-    offset_pair_means: np.ndarray,
-    min_pair_count: int,
-) -> None:
-    detector_edges = np.linspace(-0.5, 17.5, 19)
-    output_file["Detector_Time_Offsets"] = detector_offsets, detector_edges
-
-    used_pair_counts = np.zeros(18, dtype=np.int32)
-    for detector in range(18):
-        used_pair_counts[detector] = int(
-            np.sum(offset_pair_counts[detector, :] >= min_pair_count)
-            + np.sum(offset_pair_counts[:, detector] >= min_pair_count)
-        )
-    offset_tree = output_file.mktree(
-        "DetectorOffsetCorrections",
-        {
-            "detector": np.int32,
-            "offset": np.float64,
-            "used_pair_directions": np.int32,
-        },
-    )
-    offset_tree.extend(
-        {
-            "detector": np.arange(18, dtype=np.int32),
-            "offset": detector_offsets.astype(np.float64),
-            "used_pair_directions": used_pair_counts,
-        }
-    )
-
-    pair_i, pair_j = np.nonzero(offset_pair_counts > 0)
-    pair_tree = output_file.mktree(
-        "DetectorOffsetPairEstimates",
-        {
-            "index_i": np.int32,
-            "index_j": np.int32,
-            "mean_model_corrected_tdiff": np.float64,
-            "count": np.int64,
-            "used_in_offset_fit": np.bool_,
-        },
-    )
-    pair_tree.extend(
-        {
-            "index_i": pair_i.astype(np.int32),
-            "index_j": pair_j.astype(np.int32),
-            "mean_model_corrected_tdiff": offset_pair_means[pair_i, pair_j].astype(np.float64),
-            "count": offset_pair_counts[pair_i, pair_j].astype(np.int64),
-            "used_in_offset_fit": (offset_pair_counts[pair_i, pair_j] >= min_pair_count),
-        }
-    )
-
-
 def create_tree(output_file: Any):
     return output_file.mktree(
         "TimeCorrection",
@@ -752,25 +590,12 @@ def create_tree(output_file: Any):
             "index_j": np.int32,
             "T_Diff": np.float64,
             "T_pred": np.float64,
-            "T_Model_Corrected": np.float64,
-            "T_Offset_Correction": np.float64,
             "T_Diff_Corrected": np.float64,
         },
     )
 
 
-def fill_outputs(
-    file_specs,
-    model,
-    chunk_size,
-    total_entries,
-    require_dynode,
-    pair_builder_args,
-    tree,
-    state,
-    detector_offsets,
-    args,
-):
+def fill_outputs(file_specs, model, chunk_size, total_entries, require_dynode, pair_builder_args, tree, state, args):
     with tqdm(total=total_entries, unit="events", desc="Writing corrected output") as pbar:
         for completed, pair_df in iter_pair_chunks(
             file_specs,
@@ -784,12 +609,7 @@ def fill_outputs(
             predictions = predict_tdiff(model, pair_df[FEATURE_COLUMNS])
             pair_df = pair_df.copy()
             pair_df["T_pred"] = predictions
-            index_i = pair_df["index_i"].to_numpy(dtype=np.intp)
-            index_j = pair_df["index_j"].to_numpy(dtype=np.intp)
-            offset_correction = detector_pair_offsets(index_i, index_j, detector_offsets)
-            pair_df["T_Model_Corrected"] = pair_df["T_Diff"].to_numpy(dtype=float) - predictions
-            pair_df["T_Offset_Correction"] = offset_correction
-            pair_df["T_Diff_Corrected"] = pair_df["T_Model_Corrected"].to_numpy(dtype=float) - offset_correction
+            pair_df["T_Diff_Corrected"] = pair_df["T_Diff"].to_numpy(dtype=float) - predictions
             if tree is not None:
                 tree.extend(
                     {
@@ -801,8 +621,6 @@ def fill_outputs(
                         "index_j": pair_df["index_j"].to_numpy(dtype=np.int32),
                         "T_Diff": pair_df["T_Diff"].to_numpy(dtype=np.float64),
                         "T_pred": pair_df["T_pred"].to_numpy(dtype=np.float64),
-                        "T_Model_Corrected": pair_df["T_Model_Corrected"].to_numpy(dtype=np.float64),
-                        "T_Offset_Correction": pair_df["T_Offset_Correction"].to_numpy(dtype=np.float64),
                         "T_Diff_Corrected": pair_df["T_Diff_Corrected"].to_numpy(dtype=np.float64),
                     }
                 )
@@ -811,6 +629,8 @@ def fill_outputs(
             corrected = pair_df["T_Diff_Corrected"].to_numpy(dtype=float)
             ei = pair_df["Ei"].to_numpy(dtype=float)
             ej = pair_df["Ej"].to_numpy(dtype=float)
+            index_i = pair_df["index_i"].to_numpy(dtype=np.intp)
+            index_j = pair_df["index_j"].to_numpy(dtype=np.intp)
 
             add_hist2d(state, "Ej_Vs_T_Diff_Corrected", corrected, ej, "corrected", "energy")
             add_hist2d(state, "Ej_Vs_T_Diff", tdiff, ej, "time", "energy")
@@ -883,25 +703,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-high", type=float, default=527.45)
     parser.add_argument("--reference-detector", type=int, default=8)
     parser.add_argument(
-        "--no-offset-correction",
-        action="store_true",
-        help="Disable run-by-run detector offset solving.",
-    )
-    parser.add_argument(
-        "--offset-range",
-        nargs=2,
-        type=float,
-        default=(-20.0, 20.0),
-        metavar=("LOW", "HIGH"),
-        help="Model-corrected residual range used to estimate detector offsets.",
-    )
-    parser.add_argument(
-        "--min-offset-pair-count",
-        type=int,
-        default=100,
-        help="Minimum pair entries needed before a pair contributes to offset solving.",
-    )
-    parser.add_argument(
         "--time-range",
         nargs=2,
         type=float,
@@ -964,8 +765,6 @@ def main() -> None:
         raise ValueError("--reference-detector must be between 0 and 17")
     if not 0 <= args.compression_level <= 9:
         raise ValueError("--compression-level must be between 0 and 9")
-    if args.min_offset_pair_count < 1:
-        raise ValueError("--min-offset-pair-count must be at least 1")
     if args.max_time_bins <= 0:
         raise ValueError("--max-time-bins must be greater than 0")
     if args.max_energy_bins <= 0:
@@ -1002,15 +801,6 @@ def main() -> None:
         allowed_j,
     )
 
-    detector_offsets, offset_pair_counts, offset_pair_means = estimate_detector_offsets(
-        file_specs,
-        model,
-        args.chunk_size,
-        total_entries,
-        require_dynode,
-        pair_builder_args,
-        args,
-    )
     tdiff_range, corrected_range, ej_range = scan_ranges(
         file_specs,
         model,
@@ -1018,7 +808,6 @@ def main() -> None:
         total_entries,
         require_dynode,
         pair_builder_args,
-        detector_offsets,
     )
     tdiff_range, corrected_range, ej_range = apply_histogram_range_limits(
         tdiff_range,
@@ -1044,19 +833,10 @@ def main() -> None:
             pair_builder_args,
             tree,
             histogram_state,
-            detector_offsets,
             args,
         )
         print("Writing histogram objects...", flush=True)
         write_histograms(output_file, histogram_state)
-        print("Writing detector offset summary...", flush=True)
-        write_offset_tables(
-            output_file,
-            detector_offsets,
-            offset_pair_counts,
-            offset_pair_means,
-            args.min_offset_pair_count,
-        )
         print("Closing output ROOT file...", flush=True)
     finally:
         output_file.close()
