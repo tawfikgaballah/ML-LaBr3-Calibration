@@ -363,33 +363,6 @@ python train_clover_apply_labr_calibration.py run-0989-forward-1-sorted.root \
 It trains on `clover.energy -> clover.ecal` and applies the learned calibration
 function to `labr.energy`.
 
-## 7. Sync To Remote Server
-
-To automatically sync code changes to the remote analysis folder:
-
-```bash
-./sync_to_remote.sh 2
-```
-
-The sync target is:
-
-```text
-gaballah@nsclgw1.nscl.msu.edu:/mnt/analysis/e23055/tg/ML/
-```
-
-The sync script uses `rsync` with SSH connection reuse and excludes large or
-generated files such as:
-
-- virtual environments
-- `__pycache__`
-- `*.root`
-- `*.joblib`
-- PNG output folders
-- extracted `test_6D_input*.csv`
-- extracted `test_6D_input*.pkl`
-
-Passwordless SSH keys make the watcher much smoother because it otherwise asks
-for the SSH password on each reconnect.
 
 ## Practical Notes
 
