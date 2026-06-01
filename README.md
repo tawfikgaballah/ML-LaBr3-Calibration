@@ -168,7 +168,10 @@ The ROOT output contains diagnostics such as:
 ## 7. Apply Time Corrections To A New Run
 
 For a new raw ROOT run, apply the same energy calibration first, then run the
-trained timing model on calibrated energies.
+trained timing model on calibrated energies. The timing model predicts the
+energy-dependent time walk. The application script then estimates detector
+offsets from the model-corrected residuals in the new run and subtracts those
+offsets too.
 
 ```bash
 python apply_time_corrections.py run-0990-forward-1-sorted.root \
@@ -194,7 +197,33 @@ The output tree is named `TimeCorrection` and contains:
 - `index_j`
 - `T_Diff`
 - `T_pred`
+- `T_Model_Corrected`
+- `T_Offset_Correction`
 - `T_Diff_Corrected`
+
+The correction definitions are:
+
+```text
+T_Model_Corrected = T_Diff - T_pred
+T_Offset_Correction = offset[index_i] - offset[index_j]
+T_Diff_Corrected = T_Model_Corrected - T_Offset_Correction
+```
+
+The run-by-run offset solve is enabled by default. It uses pair residuals inside
+`--offset-range`, which defaults to `-20 20`, and keeps only pairs with at least
+`--min-offset-pair-count`, which defaults to `100`.
+
+Useful offset outputs:
+
+- `Detector_Time_Offsets`
+- `DetectorOffsetCorrections`
+- `DetectorOffsetPairEstimates`
+
+To disable run-by-run offset solving:
+
+```bash
+--no-offset-correction
+```
 
 The output also contains diagnostics similar to `test_6D`, plus 1D histograms
 for LaBr[8] against every other detector:
