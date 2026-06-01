@@ -150,6 +150,10 @@ Default outputs include the input run label:
 - `trained_model_run-0989.joblib`
 - `test_6D_output_run-0989.root`
 
+The `.joblib` file is an offset-aware timing model. Internally, it contains the
+trained energy time-walk predictor and methods to estimate detector offsets from
+model-corrected residuals in any new run.
+
 The model uses:
 
 - independent variables: `Ei, index_i, Ej, index_j`

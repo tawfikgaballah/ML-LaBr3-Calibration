@@ -15,6 +15,8 @@ import pandas as pd
 import uproot
 from tqdm import tqdm
 
+from offset_aware_timing_model import OffsetAwareTimingModel
+
 try:
     from sklearn.base import BaseEstimator, TransformerMixin
 except ModuleNotFoundError:
@@ -57,10 +59,15 @@ def load_timing_model(path: Path):
             "This script needs joblib and scikit-learn to load the timing model. "
             "Activate the ML virtual environment and install requirements first."
         ) from exc
-    return joblib.load(path)
+    model = joblib.load(path)
+    if hasattr(model, "predict_time_walk"):
+        return model
+    return OffsetAwareTimingModel(model)
 
 
 def predict_tdiff(model: Any, features: pd.DataFrame) -> np.ndarray:
+    if hasattr(model, "predict_time_walk"):
+        return np.asarray(model.predict_time_walk(features), dtype=float).reshape(-1)
     try:
         predictions = model.predict(features, regressor__verbose=0)
     except TypeError:
@@ -476,8 +483,11 @@ def estimate_detector_offsets(
     if offset_range is None:
         raise ValueError("--offset-range is required when offset correction is enabled")
 
-    pair_sum = np.zeros((18, 18), dtype=float)
-    pair_counts = np.zeros((18, 18), dtype=float)
+    if hasattr(model, "empty_offset_statistics"):
+        pair_sum, pair_counts = model.empty_offset_statistics()
+    else:
+        pair_sum = np.zeros((18, 18), dtype=float)
+        pair_counts = np.zeros((18, 18), dtype=float)
     with tqdm(total=total_entries, unit="events", desc="Estimating detector offsets") as pbar:
         for completed, pair_df in iter_pair_chunks(
             file_specs,
@@ -488,22 +498,34 @@ def estimate_detector_offsets(
             pbar.update(completed)
             if pair_df.empty:
                 continue
-            predictions = predict_tdiff(model, pair_df[FEATURE_COLUMNS])
-            residual = pair_df["T_Diff"].to_numpy(dtype=float) - predictions
-            index_i = pair_df["index_i"].to_numpy(dtype=np.intp)
-            index_j = pair_df["index_j"].to_numpy(dtype=np.intp)
-            mask = (
-                (index_i != index_j)
-                & np.isfinite(residual)
-                & (offset_range[0] <= residual)
-                & (residual <= offset_range[1])
-            )
-            if not np.any(mask):
-                continue
-            np.add.at(pair_sum, (index_i[mask], index_j[mask]), residual[mask])
-            np.add.at(pair_counts, (index_i[mask], index_j[mask]), 1.0)
+            if hasattr(model, "accumulate_offset_statistics"):
+                model.accumulate_offset_statistics(
+                    pair_df,
+                    pair_sum,
+                    pair_counts,
+                    target_column="T_Diff",
+                    offset_range=offset_range,
+                )
+            else:
+                predictions = predict_tdiff(model, pair_df[FEATURE_COLUMNS])
+                residual = pair_df["T_Diff"].to_numpy(dtype=float) - predictions
+                index_i = pair_df["index_i"].to_numpy(dtype=np.intp)
+                index_j = pair_df["index_j"].to_numpy(dtype=np.intp)
+                mask = (
+                    (index_i != index_j)
+                    & np.isfinite(residual)
+                    & (offset_range[0] <= residual)
+                    & (residual <= offset_range[1])
+                )
+                if not np.any(mask):
+                    continue
+                np.add.at(pair_sum, (index_i[mask], index_j[mask]), residual[mask])
+                np.add.at(pair_counts, (index_i[mask], index_j[mask]), 1.0)
 
-    offsets = solve_detector_offsets(pair_sum, pair_counts, args.min_offset_pair_count)
+    if hasattr(model, "solve_detector_offsets"):
+        offsets = model.solve_detector_offsets(pair_sum, pair_counts, args.min_offset_pair_count)
+    else:
+        offsets = solve_detector_offsets(pair_sum, pair_counts, args.min_offset_pair_count)
     pair_means = np.divide(
         pair_sum,
         pair_counts,
@@ -577,7 +599,10 @@ def scan_ranges(file_specs, model, chunk_size, total_entries, require_dynode, pa
             predictions = predict_tdiff(model, pair_df[FEATURE_COLUMNS])
             index_i = pair_df["index_i"].to_numpy(dtype=np.intp)
             index_j = pair_df["index_j"].to_numpy(dtype=np.intp)
-            offset_correction = detector_pair_offsets(index_i, index_j, detector_offsets)
+            if hasattr(model, "pair_offset_correction"):
+                offset_correction = model.pair_offset_correction(index_i, index_j, detector_offsets)
+            else:
+                offset_correction = detector_pair_offsets(index_i, index_j, detector_offsets)
             corrected = pair_df["T_Diff"].to_numpy(dtype=float) - predictions - offset_correction
             tdiff_low, tdiff_high = update_min_max(pair_df["T_Diff"].to_numpy(), tdiff_low, tdiff_high)
             corr_low, corr_high = update_min_max(corrected, corr_low, corr_high)
@@ -786,7 +811,10 @@ def fill_outputs(
             pair_df["T_pred"] = predictions
             index_i = pair_df["index_i"].to_numpy(dtype=np.intp)
             index_j = pair_df["index_j"].to_numpy(dtype=np.intp)
-            offset_correction = detector_pair_offsets(index_i, index_j, detector_offsets)
+            if hasattr(model, "pair_offset_correction"):
+                offset_correction = model.pair_offset_correction(index_i, index_j, detector_offsets)
+            else:
+                offset_correction = detector_pair_offsets(index_i, index_j, detector_offsets)
             pair_df["T_Model_Corrected"] = pair_df["T_Diff"].to_numpy(dtype=float) - predictions
             pair_df["T_Offset_Correction"] = offset_correction
             pair_df["T_Diff_Corrected"] = pair_df["T_Model_Corrected"].to_numpy(dtype=float) - offset_correction

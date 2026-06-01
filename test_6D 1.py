@@ -51,6 +51,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.base import BaseEstimator, TransformerMixin
 from tensorflow.keras.losses import Loss
 from keras.utils import plot_model
+from offset_aware_timing_model import OffsetAwareTimingModel
 
 
 TEST_6D_COLUMNS = ["Ei", "index_i", "Ej", "index_j", "tdiff", "tdiff_aligned"]
@@ -539,8 +540,9 @@ print('Mean Squared Error:', mse)
 # mu, std = norm.fit(residuals)
 
 # print('Standard Deviation of Gaussian Fit:', std)
- # Save the trained model
-dump(pipeline, args.model_output)
+ # Save the trained model with run-by-run detector-offset detection support.
+timing_model = OffsetAwareTimingModel(pipeline)
+dump(timing_model, args.model_output)
 
 
 # Convert the y_diff array to a numpy array
