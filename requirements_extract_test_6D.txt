@@ -1,0 +1,10 @@
+awkward
+joblib
+numpy
+pandas
+scikit-learn
+scipy
+tensorflow
+tqdm
+uproot
+xgboost

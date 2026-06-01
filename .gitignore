@@ -1,0 +1,41 @@
+# Virtual environments and caches
+.venv/
+.venv_wsl/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Local command/history artifacts
+.history/
+
+# Large/generated analysis outputs
+*.root
+*.joblib
+*.h5
+*.keras
+*.png
+*.pdf
+
+# Extracted dataframe and smoke-test outputs
+test_6D_input*.pkl
+test_6D_input*.csv
+test_6D_input_smoke*
+test_6D_input_cli_smoke*
+test_6D_input_multifile_smoke*
+test_6D_input_progress_smoke*
+
+# Generated calibration products
+labr_energy_calibration_points*.csv
+labr_energy_calibration_coefficients*.csv
+labr_pngs/
+labr_cal_pngs/
+ei_ecal_pngs/
+applied_ei_ecal_pngs/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
