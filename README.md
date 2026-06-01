@@ -352,16 +352,6 @@ python apply_ei_ecal_model.py run-0990-forward-1-sorted.root \
   --model ei_to_ecal_model.joblib
 ```
 
-There is also a clover-trained utility:
-
-```bash
-python train_clover_apply_labr_calibration.py run-0989-forward-1-sorted.root \
-  --model-output clover_energy_to_ecal_model.joblib \
-  --predictions-output labr_ecal_from_clover_model.root
-```
-
-It trains on `clover.energy -> clover.ecal` and applies the learned calibration
-function to `labr.energy`.
 
 
 ## Practical Notes
